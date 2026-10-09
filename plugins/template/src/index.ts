@@ -1,4 +1,4 @@
-import { findByProps, findByPropsAll } from "@vendetta/metro";
+import { find, findAll, findByProps } from "@vendetta/metro";
 import { instead } from "@vendetta/patcher";
 import { clipboard } from "@vendetta/metro/common";
 import { showToast } from "@vendetta/ui/toasts";
@@ -8,80 +8,74 @@ const unpatches: (() => boolean)[] = [];
 
 export default {
     onLoad: () => {
-        // 1. Resolve React Native's core Alert module
-        const RNAlert = findByProps("alert", "prompt");
+        // 1. Visual confirmation that the plugin is running
+        showToast("CopyLinkButton Active!", getAssetIDByName("ic_message_copy"));
 
-        const showLinkOptions = (targetUrl: string, openCallback: () => void) => {
+        // 2. Resolve React Native's Alert dialog
+        const RNAlert = find((m: any) => m && typeof m.alert === "function" && typeof m.prompt === "function");
+
+        const handleUrl = (targetUrl: string, orig: Function, args: any[]) => {
+            if (!targetUrl || typeof targetUrl !== "string") {
+                return orig(...args);
+            }
+
+            // Immediately copy to clipboard as guaranteed fallback
+            clipboard.setString(targetUrl);
+            showToast("Copied link to clipboard!", getAssetIDByName("toast_copy_link"));
+
+            // Prompt user if they still want to open it
             if (RNAlert && typeof RNAlert.alert === "function") {
                 RNAlert.alert(
-                    "Link Options",
+                    "Link Copied!",
                     targetUrl,
                     [
                         {
-                            text: "Copy Link",
-                            onPress: () => {
-                                clipboard.setString(targetUrl);
-                                showToast("Link copied to clipboard!", getAssetIDByName("toast_copy_link"));
-                            }
-                        },
-                        {
                             text: "Open in Browser",
-                            onPress: () => openCallback()
+                            onPress: () => orig(...args)
                         },
                         {
-                            text: "Cancel",
+                            text: "Done",
                             style: "cancel"
                         }
                     ]
                 );
-            } else {
-                // Fallback: Copy directly and prevent browser
-                clipboard.setString(targetUrl);
-                showToast("Link copied to clipboard!", getAssetIDByName("toast_copy_link"));
             }
         };
 
-        // 2. Intercept EVERY module in Discord that has openURL or openDeeplink
-        const urlModules = [
-            ...(findByPropsAll("openURL") || []),
-            ...(findByPropsAll("openDeeplink") || [])
-        ];
-        const uniqueModules = [...new Set(urlModules)];
+        // 3. Hook all JavaScript modules that open URLs
+        const urlModules = findAll((m: any) => m && (typeof m.openURL === "function" || typeof m.openDeeplink === "function"));
 
-        for (const mod of uniqueModules) {
-            if (typeof mod?.openURL === "function") {
-                unpatches.push(
-                    instead("openURL", mod, (args, orig) => {
-                        const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
-                        if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
-                            showLinkOptions(url, () => orig(...args));
-                        } else {
-                            return orig(...args);
-                        }
-                    })
-                );
-            }
+        for (const mod of urlModules) {
+            const func = typeof mod.openURL === "function" ? "openURL" : "openDeeplink";
+            unpatches.push(
+                instead(func, mod, (args, orig) => {
+                    const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
+                    if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+                        handleUrl(url, orig, args);
+                    } else {
+                        return orig(...args);
+                    }
+                })
+            );
         }
 
-        // 3. Intercept NativeModules (this is what stops the in-app browser!)
+        // 4. Hook NativeModules (blocks Chrome Custom Tabs & native browser)
         const NativeModules = findByProps("NativeModules")?.NativeModules || {};
-        const nativeBrowserModules = [
+        const nativeMods = [
             NativeModules.DCDInAppBrowser,
             NativeModules.InAppBrowser,
-            NativeModules.RNInAppBrowser,
             NativeModules.CustomTabsAndroid,
-            NativeModules.CustomTabs,
             NativeModules.LinkingManager
         ].filter(Boolean);
 
-        for (const nativeMod of nativeBrowserModules) {
-            const funcName = nativeMod.open ? "open" : nativeMod.openURL ? "openURL" : null;
-            if (funcName && typeof nativeMod[funcName] === "function") {
+        for (const nMod of nativeMods) {
+            const func = nMod.open ? "open" : nMod.openURL ? "openURL" : null;
+            if (func && typeof nMod[func] === "function") {
                 unpatches.push(
-                    instead(funcName, nativeMod, (args, orig) => {
+                    instead(func, nMod, (args, orig) => {
                         const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
                         if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
-                            showLinkOptions(url, () => orig(...args));
+                            handleUrl(url, orig, args);
                         } else {
                             return orig(...args);
                         }
